@@ -20,6 +20,9 @@ NEURO_EMBEDDING_PROVIDER (auto|sentence-transformers|ollama|hashing).
 from __future__ import annotations
 
 import logging
+import os
+import sys
+from io import TextIOWrapper
 from typing import Any, Dict, List, Optional
 
 from crawler.database import Neo4jRepository
@@ -29,7 +32,9 @@ from graphrag.retriever import GraphRAGRetriever
 logger = logging.getLogger("neuromcp.mcp")
 
 try:
+    import anyio
     from mcp.server.fastmcp import FastMCP
+    from mcp.server.stdio import stdio_server
 except ImportError as e:  # pragma: no cover
     raise ImportError(
         "Pacote MCP ausente. Instale o extra: `uv sync --extra mcp`."
@@ -166,10 +171,108 @@ def estatisticas_grafo() -> Dict[str, Any]:
         return {"erro": str(e), "dica": "Neo4j está no ar? (docker compose up -d)"}
 
 
+class _StdinSemLinhasVazias:
+    """
+    Envolve o stdin assíncrono e descarta linhas em branco / só-espaço.
+
+    Por quê: no transporte stdio, o parser JSON-RPC do SDK (mcp/server/stdio.py)
+    tenta `JSONRPCMessage.model_validate_json(line)` em CADA linha. Uma linha em
+    branco ('\\n') vira `Invalid JSON: EOF while parsing a value` e o servidor
+    reporta `Internal Server Error`. Filtrar aqui elimina esse erro sem afetar
+    nenhuma mensagem válida (JSON-RPC nunca é uma linha vazia).
+    """
+
+    def __init__(self, stream: Any):
+        self._stream = stream
+
+    def __aiter__(self):
+        return self._gen()
+
+    async def _gen(self):
+        async for line in self._stream:
+            if line.strip():
+                yield line
+
+
+def _configurar_logging() -> None:
+    """
+    TODO log vai para STDERR — NUNCA stdout, que é o canal do protocolo JSON-RPC.
+    Escrever qualquer coisa não-JSON no stdout corromperia a comunicação MCP.
+    """
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr, force=True)
+    for ruidoso in ("neuromcp", "neo4j", "httpx", "httpcore"):
+        logging.getLogger(ruidoso).setLevel(logging.WARNING)
+    # Evita que bibliotecas de embeddings escrevam barras de progresso no stdout.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+
+
+async def _run_stdio() -> None:
+    """Roda o servidor sobre stdio com stdin resiliente a linhas em branco."""
+    stdin = anyio.wrap_file(TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace"))
+    async with stdio_server(stdin=_StdinSemLinhasVazias(stdin)) as (read_stream, write_stream):
+        await mcp._mcp_server.run(
+            read_stream,
+            write_stream,
+            mcp._mcp_server.create_initialization_options(),
+        )
+
+
+def _run_http(host: str, port: int, path: str, transport: str) -> None:
+    """
+    Roda o servidor via HTTP (Streamable HTTP ou SSE) — necessário para acesso
+    REMOTO (ex.: túnel ngrok + conector MCP do Mistral). Em HTTP o stdout NÃO é o
+    canal do protocolo, então logs normais são seguros.
+
+    Desliga a proteção contra DNS-rebinding porque o Host de entrada é o domínio
+    dinâmico do ngrok (não localhost). O servidor é somente-leitura; ainda assim,
+    exponha apenas enquanto necessário (ver aviso de segurança no README/script).
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr, force=True)
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+    mcp.settings.host = host
+    mcp.settings.port = port
+    mcp.settings.streamable_http_path = path
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+    logger.warning(
+        "MCP HTTP em http://%s:%s%s — proteção DNS-rebinding DESLIGADA (túnel dinâmico). "
+        "Servidor read-only; exponha apenas enquanto necessário.",
+        host, port, path,
+    )
+    mcp.run(transport=transport)
+
+
 def main() -> None:
-    """Ponto de entrada: roda o servidor MCP via stdio."""
-    logging.basicConfig(level=logging.INFO)
-    mcp.run()
+    """Ponto de entrada do servidor MCP. Padrão: stdio (local). `--transport http` p/ acesso remoto."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="neuro-mcp",
+        description="Servidor MCP GraphRAG de neurodivergência (stdio local ou HTTP remoto).",
+    )
+    parser.add_argument(
+        "--transport", choices=["stdio", "http", "sse"],
+        default=os.getenv("NEURO_MCP_TRANSPORT", "stdio"),
+        help="stdio (padrão, local) | http (Streamable HTTP, p/ ngrok/Mistral) | sse",
+    )
+    parser.add_argument("--host", default=os.getenv("NEURO_MCP_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.getenv("NEURO_MCP_PORT", "8000")))
+    parser.add_argument("--path", default=os.getenv("NEURO_MCP_PATH", "/mcp"),
+                        help="Caminho do endpoint HTTP (padrão /mcp).")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        _configurar_logging()
+        anyio.run(_run_stdio)
+    else:
+        transporte = "streamable-http" if args.transport == "http" else "sse"
+        _run_http(args.host, args.port, args.path, transporte)
 
 
 if __name__ == "__main__":

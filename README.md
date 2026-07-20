@@ -573,6 +573,29 @@ Configuração em um cliente MCP (`.mcp.json`):
 }
 ```
 
+### Acesso remoto (ngrok + Mistral AI)
+
+O transporte **stdio** é local. Para usar o servidor como **conector MCP remoto** (ex.: no chat do **Mistral AI**), rode-o em **HTTP (Streamable HTTP)** e exponha via **ngrok**:
+
+```bash
+# pré-requisitos: ngrok autenticado (ngrok config add-authtoken <TOKEN>), Neo4j no ar e populado
+./scripts/mcp_ngrok.sh
+```
+
+O script: (1) sobe o servidor em HTTP (`neuro-mcp --transport http`), (2) abre o túnel ngrok, (3) descobre a URL pública (via API local do ngrok em `:4040`) e imprime o **endpoint MCP** — algo como `https://xxxx.ngrok-free.app/mcp`.
+
+No Mistral (Le Chat / La Plateforme), adicione um **servidor MCP remoto (HTTP/Streamable HTTP)** e cole essa URL. As 6 ferramentas ficam disponíveis.
+
+Também é possível rodar o HTTP manualmente:
+
+```bash
+uv run neuro-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+```
+
+Variáveis: `NEURO_MCP_PORT` (8000), `NEURO_MCP_PATH` (/mcp), `NEURO_MCP_TRANSPORT` (`http` | `sse` | `stdio`).
+
+> ⚠️ **Segurança:** no modo HTTP a proteção contra DNS-rebinding é desligada (o Host do ngrok é dinâmico) e **qualquer pessoa com a URL pode consultar** o servidor — que é **somente-leitura** sobre a ontologia/artigos. A URL do ngrok gratuito é pública e efêmera; **encerre o túnel (Ctrl+C) ao terminar**. Não exponha dados sensíveis por este caminho.
+
 ---
 
 ## 12. Consultas Cypher de exemplo
@@ -657,6 +680,7 @@ uv run pytest -q
 | Log "Usando HashingProvider (NÃO-semântico)" | `sentence-transformers` ausente | `uv sync --extra embeddings` + `NEURO_EMBEDDING_PROVIDER=sentence-transformers` |
 | Erro de **dimensão** ao gravar embeddings | `NEURO_EMBEDDING_DIM` ≠ dim do provedor | Ajuste a dim e **re-seed** (recria índices) |
 | `neuro-mcp: command not found` | Extra MCP não instalado | `uv sync --extra mcp` |
+| MCP: `Invalid JSON: EOF ... '\n'` + `Internal Server Error` | Linha em branco no stdin (ex.: rodar o servidor e digitar Enter no terminal) | **Já tratado** — o servidor filtra linhas vazias. Não digite direto no terminal; use um cliente MCP ou o MCP Inspector |
 | `--crawl` não traz resultados | Rede/anti-bot do DuckDuckGo | Reduza `--max-results`, tente `--sources`, ou use `--ingest-samples` |
 | `--crawl` falha com erro de certificado TLS | Host com certificado inválido/expirado | Prefira outra fonte; em último caso, `NEURO_ALLOW_INSECURE_TLS=1` (**inseguro**) |
 
