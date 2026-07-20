@@ -35,6 +35,8 @@ try:
     import anyio
     from mcp.server.fastmcp import FastMCP
     from mcp.server.stdio import stdio_server
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
 except ImportError as e:  # pragma: no cover
     raise ImportError(
         "Pacote MCP ausente. Instale o extra: `uv sync --extra mcp`."
@@ -169,6 +171,43 @@ def estatisticas_grafo() -> Dict[str, Any]:
         return {"nos": nos, "arestas": arestas}
     except Exception as e:  # noqa: BLE001
         return {"erro": str(e), "dica": "Neo4j está no ar? (docker compose up -d)"}
+
+
+# ---------------------------------------------------------------------------
+# Rotas HTTP auxiliares (usadas apenas no modo --transport http/sse).
+# Objetivo: evitar 404 confusos quando um NAVEGADOR ou um BOT de varredura
+# acessa a raiz. O endpoint MCP real é sempre o de --path (padrão /mcp).
+# Requisições a /.git/*, /security.txt etc. são scanners automáticos da internet
+# e DEVEM continuar recebendo 404 (o servidor não expõe nada nesses caminhos).
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/", methods=["GET"])
+async def _raiz(request: Request) -> Response:
+    caminho = mcp.settings.streamable_http_path
+    return JSONResponse({
+        "servico": "neuromcp-graphrag",
+        "tipo": "Servidor MCP (Model Context Protocol) — Streamable HTTP",
+        "observacao": (
+            "Isto é um endpoint de API MCP, não um site. Configure a URL "
+            f"terminada em '{caminho}' no seu cliente MCP (ex.: Mistral Le Chat)."
+        ),
+        "endpoint_mcp": caminho,
+        "health": "/health",
+        "ferramentas": [
+            "responder_com_graphrag", "buscar_conceito", "comorbidades",
+            "listar_conceitos", "artigos_do_conceito", "estatisticas_grafo",
+        ],
+    })
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(request: Request) -> Response:
+    return JSONResponse({"status": "ok", "servico": "neuromcp-graphrag"})
+
+
+@mcp.custom_route("/favicon.ico", methods=["GET"])
+async def _favicon(request: Request) -> Response:
+    return Response(status_code=204)  # sem conteúdo — evita 404 de favicon
 
 
 class _StdinSemLinhasVazias:

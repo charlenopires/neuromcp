@@ -671,6 +671,9 @@ Variáveis do script/servidor: `NEURO_MCP_PORT` (8000) · `NEURO_MCP_PATH` (/mcp
 | Mistral não conecta / erro ao adicionar | URL sem o caminho `/mcp` ou túnel fora do ar | Use a URL **completa** com `/mcp`; confira se o script ainda roda |
 | Conector some / para de responder | Script/túnel encerrado ou URL antiga do ngrok | Rode o script de novo e **atualize a Server URL** no conector |
 | Ferramentas respondem sem dados | Neo4j vazio | `uv run crawler --ingest-samples` |
+| Logs com `404` em `/`, `/.git/config`, `/.git/HEAD`, `/security.txt`, `/favicon.ico` | **Normal, não é erro** — bots de varredura da internet + navegador abrindo a raiz do túnel público ([reconhecimento automático](https://www.indusface.com/learning/probing-bots/)) | Ignore. O servidor só atende `/mcp`; o `404` é a resposta **correta e segura** (nada é exposto em `.git`). A raiz `/` responde um JSON informativo, `/health` faz health-check, e `/favicon.ico` retorna `204` |
+
+> **Sobre os `404` no log do ngrok:** assim que a URL fica pública, bots varrem constantemente procurando arquivos sensíveis (`.git`, `security.txt` etc.). Ver `404` nesses caminhos é esperado e significa que o servidor **não** os expõe. Só há problema se você **não** vir requisições ao seu endpoint `/mcp` quando o Mistral se conectar — nesse caso, confira se a Server URL do conector inclui `/mcp` e se o túnel está no ar. Abrir a URL raiz no navegador agora mostra um JSON de status (não um site).
 
 > Fontes: [Mistral — MCP Connectors (docs)](https://docs.mistral.ai/vibe/work/connectors/mcp-connectors) · [Mistral — Custom MCP connectors (anúncio)](https://mistral.ai/news/le-chat-mcp-connectors-memories/) · [Mistral Help Center — Using MCP connectors with Le Chat](https://help.mistral.ai/en/articles/393511-using-my-mcp-connectors-with-le-chat)
 
