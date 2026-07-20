@@ -573,28 +573,106 @@ Configuração em um cliente MCP (`.mcp.json`):
 }
 ```
 
-### Acesso remoto (ngrok + Mistral AI)
+### Acesso remoto: usar o servidor MCP no chat do Mistral AI (via ngrok)
 
-O transporte **stdio** é local. Para usar o servidor como **conector MCP remoto** (ex.: no chat do **Mistral AI**), rode-o em **HTTP (Streamable HTTP)** e exponha via **ngrok**:
+O transporte **stdio** só funciona localmente. Para plugar o servidor como **conector MCP remoto no [Mistral Le Chat](https://chat.mistral.ai)**, ele precisa falar **HTTP (Streamable HTTP)** e ter uma **URL pública** — é isso que o [`scripts/mcp_ngrok.sh`](scripts/mcp_ngrok.sh) automatiza.
+
+```mermaid
+flowchart LR
+    LC["💬 Mistral Le Chat<br/>(conector MCP)"]
+    subgraph NUVEM["Internet"]
+        NG["🌐 ngrok<br/>https://xxxx.ngrok-free.app"]
+    end
+    subgraph LOCAL["Sua máquina"]
+        SRV["neuro-mcp --transport http<br/>127.0.0.1:8000/mcp"]
+        NEO[("Neo4j")]
+        SRV <--> NEO
+    end
+    LC -->|"HTTPS + MCP"| NG -->|"túnel"| SRV
+```
+
+O fluxo: **Le Chat → ngrok (URL pública HTTPS) → servidor MCP HTTP local → Neo4j**.
+
+#### Passo 0 — Pré-requisitos (uma vez)
+
+1. **Conta ngrok + authtoken** (grátis): crie em <https://dashboard.ngrok.com>, depois:
+   ```bash
+   ngrok config add-authtoken <SEU_TOKEN>
+   ```
+2. **Dependências MCP** instaladas: `uv sync --extra mcp`
+3. **Neo4j no ar e populado**:
+   ```bash
+   docker compose up -d
+   uv run crawler --ingest-samples      # semeia ontologia + artigos + embeddings
+   ```
+4. Conta no **Mistral** com acesso a **conectores MCP personalizados** no Le Chat (recurso pode depender do seu plano — ver [Help Center do Mistral](https://help.mistral.ai/en/articles/393511-using-my-mcp-connectors-with-le-chat)).
+
+#### Passo 1 — Expor o servidor
 
 ```bash
-# pré-requisitos: ngrok autenticado (ngrok config add-authtoken <TOKEN>), Neo4j no ar e populado
 ./scripts/mcp_ngrok.sh
 ```
 
-O script: (1) sobe o servidor em HTTP (`neuro-mcp --transport http`), (2) abre o túnel ngrok, (3) descobre a URL pública (via API local do ngrok em `:4040`) e imprime o **endpoint MCP** — algo como `https://xxxx.ngrok-free.app/mcp`.
+O script (1) sobe o servidor em HTTP (`neuro-mcp --transport http`), (2) abre o túnel ngrok, (3) descobre a URL pública pela API local do ngrok (`http://127.0.0.1:4040`) e imprime o **endpoint MCP**, por exemplo:
 
-No Mistral (Le Chat / La Plateforme), adicione um **servidor MCP remoto (HTTP/Streamable HTTP)** e cole essa URL. As 6 ferramentas ficam disponíveis.
+```
+ URL do conector MCP (use esta no Mistral):
+     https://a1b2-c3d4.ngrok-free.app/mcp
+```
 
-Também é possível rodar o HTTP manualmente:
+> **Deixe o terminal aberto** — enquanto o script roda, o túnel e o servidor ficam de pé. `Ctrl+C` encerra os dois.
+
+#### Passo 2 — Adicionar o conector no Mistral Le Chat
+
+No [Le Chat](https://chat.mistral.ai):
+
+1. Abra **Connectors** (Conectores) → **+ Add Connector** (Adicionar conector).
+2. Vá para a aba **Custom MCP Connector** (Conector MCP personalizado).
+3. Preencha:
+   - **Connector name**: `neurodivergencia` *(sem espaços/caracteres especiais)*
+   - **Server URL**: cole a URL do Passo 1 — ex.: `https://a1b2-c3d4.ngrok-free.app/mcp`
+   - **Description** (opcional): *"GraphRAG de neurodivergências (ontologia + artigos)"*
+4. O Mistral detecta a autenticação automaticamente → escolha **No authentication** (o servidor não exige credenciais).
+5. Clique em **Connect** (Conectar).
+
+O Mistral fará o handshake MCP e listará as **6 ferramentas**: `responder_com_graphrag`, `buscar_conceito`, `comorbidades`, `listar_conceitos`, `artigos_do_conceito`, `estatisticas_grafo`.
+
+#### Passo 3 — Usar no chat
+
+Com o conector ativo, basta perguntar em linguagem natural — o Le Chat chama a ferramenta certa. Exemplos:
+
+- *"Quais as comorbidades do TDAH e como diferenciar de bipolaridade?"* → `responder_com_graphrag`
+- *"Me explique a dislexia e seus domínios cognitivos afetados."* → `buscar_conceito`
+- *"Liste os transtornos específicos de aprendizagem."* → `listar_conceitos`
+- *"Quantos artigos e conceitos há no grafo?"* → `estatisticas_grafo`
+
+#### Execução manual (sem o script)
 
 ```bash
 uv run neuro-mcp --transport http --host 127.0.0.1 --port 8000 --path /mcp
+# em outro terminal:
+ngrok http 8000
+# use a URL do ngrok + o caminho /mcp no Mistral
 ```
 
-Variáveis: `NEURO_MCP_PORT` (8000), `NEURO_MCP_PATH` (/mcp), `NEURO_MCP_TRANSPORT` (`http` | `sse` | `stdio`).
+Variáveis do script/servidor: `NEURO_MCP_PORT` (8000) · `NEURO_MCP_PATH` (/mcp) · `NEURO_MCP_TRANSPORT` (`http` | `sse` | `stdio`).
 
-> ⚠️ **Segurança:** no modo HTTP a proteção contra DNS-rebinding é desligada (o Host do ngrok é dinâmico) e **qualquer pessoa com a URL pode consultar** o servidor — que é **somente-leitura** sobre a ontologia/artigos. A URL do ngrok gratuito é pública e efêmera; **encerre o túnel (Ctrl+C) ao terminar**. Não exponha dados sensíveis por este caminho.
+#### Observações importantes
+
+- **A URL do ngrok gratuito muda a cada execução.** Ao reiniciar o script, atualize a **Server URL** do conector no Le Chat. (Um domínio fixo exige plano pago do ngrok: `ngrok http 8000 --domain=seu-dominio.ngrok-free.app`.)
+- **Mantenha o script rodando** enquanto usa o conector; ao fechar, o conector para de responder.
+- ⚠️ **Segurança:** no modo HTTP a proteção contra DNS-rebinding é desligada (o Host do ngrok é dinâmico) e **qualquer pessoa com a URL pode consultar** o servidor — que é **somente-leitura** sobre a ontologia/artigos (nada sensível). A URL é pública e efêmera; **encerre o túnel (Ctrl+C) ao terminar**.
+
+#### Solução de problemas (remoto)
+
+| Sintoma | Causa | Solução |
+| :-- | :-- | :-- |
+| Script: "Não consegui obter a URL pública do ngrok" | authtoken não configurado | `ngrok config add-authtoken <TOKEN>` |
+| Mistral não conecta / erro ao adicionar | URL sem o caminho `/mcp` ou túnel fora do ar | Use a URL **completa** com `/mcp`; confira se o script ainda roda |
+| Conector some / para de responder | Script/túnel encerrado ou URL antiga do ngrok | Rode o script de novo e **atualize a Server URL** no conector |
+| Ferramentas respondem sem dados | Neo4j vazio | `uv run crawler --ingest-samples` |
+
+> Fontes: [Mistral — MCP Connectors (docs)](https://docs.mistral.ai/vibe/work/connectors/mcp-connectors) · [Mistral — Custom MCP connectors (anúncio)](https://mistral.ai/news/le-chat-mcp-connectors-memories/) · [Mistral Help Center — Using MCP connectors with Le Chat](https://help.mistral.ai/en/articles/393511-using-my-mcp-connectors-with-le-chat)
 
 ---
 
