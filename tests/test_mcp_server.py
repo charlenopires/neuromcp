@@ -18,6 +18,28 @@ pytest.importorskip("mcp")  # servidor MCP requer `uv sync --extra mcp`
 from mcp_server.server import _StdinSemLinhasVazias  # noqa: E402
 
 
+def test_registra_tools_resources_prompts():
+    """O servidor deve expor os 3 primitivos MCP: tools, resources (+template) e prompts."""
+    from mcp_server import server as srv
+
+    async def _coletar():
+        return (
+            await srv.mcp.list_tools(),
+            await srv.mcp.list_resources(),
+            await srv.mcp.list_resource_templates(),
+            await srv.mcp.list_prompts(),
+        )
+
+    tools, resources, templates, prompts = asyncio.run(_coletar())
+    assert {
+        "responder_com_graphrag", "buscar_conceito", "comorbidades",
+        "listar_conceitos", "artigos_do_conceito", "estatisticas_grafo",
+    } <= {t.name for t in tools}
+    assert len(resources) >= 4
+    assert any("{concept_id}" in t.uriTemplate for t in templates)
+    assert {"explicar_neurodivergencia", "comparar_neurodivergencias"} <= {p.name for p in prompts}
+
+
 def test_filtro_descarta_linhas_vazias():
     async def fonte():
         for linha in ["\n", "   \n", '{"a":1}\n', "\t\n", '{"b":2}\n']:

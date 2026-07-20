@@ -542,21 +542,51 @@ uv run neuro-mcp
 
 ## 11. Servidor MCP
 
-Expõe o GraphRAG como **ferramentas MCP** (somente leitura) para qualquer cliente (Claude Code/Desktop, etc.).
+O servidor ([mcp_server/server.py](mcp_server/server.py)) expõe, **somente leitura**, os três primitivos do MCP:
+
+- **6 Ferramentas (Tools)** — ações que o modelo invoca (GraphRAG e consultas ao grafo).
+- **5 Recursos (Resources)** — dados navegáveis da ontologia (lidos do JSON local; **sempre disponíveis**, mesmo sem Neo4j).
+- **2 Prompts** — modelos de instrução reutilizáveis que o cliente pode inserir no chat.
 
 ```bash
 uv sync --extra mcp
-uv run neuro-mcp      # transporte stdio
+uv run neuro-mcp                 # transporte stdio (local)
+uv run neuro-mcp --transport http --port 8000 --path /mcp   # HTTP (remoto/ngrok)
 ```
 
-| Ferramenta | O que faz |
+> Nem todo cliente usa os três primitivos: alguns só consomem **Tools**; Claude Desktop, por exemplo, também mostra **Resources** e **Prompts**.
+
+#### 🛠️ Ferramentas (Tools)
+
+| Ferramenta | Parâmetros | Retorna | Neo4j |
+| :-- | :-- | :-- | :-- |
+| **`responder_com_graphrag`** | `pergunta: str`, `top_k_chunks=6`, `top_k_conceitos=5` | Recuperação híbrida completa: `conceitos[]` (definição, domínios, comorbidades, diagnóstico diferencial, pontos fortes, `via`, `score`), `chunks[]` (evidências com texto/fonte), `contextoFormatado` (Markdown pronto p/ o LLM) e `avisos[]` | opcional¹ |
+| **`buscar_conceito`** | `termo: str` (id/rótulo/sigla/sinônimo, ex.: `"TDAH"`, `"nd:dislexia"`) | Conceito resolvido + vizinhança no grafo (categoria, domínios, comorbidades, diagnóstico diferencial, `totalArtigos`) | opcional¹ |
+| **`comorbidades`** | `conceito_id: str` | Lista de comorbidades: `id`, `rótulo`, `força`, `prevalência` | sim |
+| **`listar_conceitos`** | `categoria: str \| None` (ex.: `"cat:aprendizagem"`) | Conceitos: `id`, `rotuloPt`, `categoria`, `statusInclusao` | não (ontologia local) |
+| **`artigos_do_conceito`** | `conceito_id: str`, `limite=10` | Artigos coletados que mencionam o conceito: `titulo`, `url`, `confianca`, `evidencias` | sim |
+| **`estatisticas_grafo`** | — | Contagens de **nós** e **arestas** do grafo | sim |
+
+> ¹ *opcional*: funciona sem Neo4j (degrada para a ontologia local); com o banco no ar, traz também as evidências de artigos (`:Chunk`) e as contagens reais.
+
+#### 📚 Recursos (Resources)
+
+Leem a **ontologia JSON local** — disponíveis mesmo com o Neo4j desligado.
+
+| URI | Conteúdo |
 | :-- | :-- |
-| `responder_com_graphrag(pergunta, top_k_chunks, top_k_conceitos)` | Recuperação híbrida completa; retorna conceitos + evidências + `contextoFormatado` |
-| `buscar_conceito(termo)` | Resolve termo (id/rótulo/sigla/sinônimo) e devolve a vizinhança no grafo |
-| `comorbidades(conceito_id)` | Comorbidades frequentes de um conceito |
-| `listar_conceitos(categoria?)` | Lista conceitos (opcionalmente por categoria) |
-| `artigos_do_conceito(conceito_id, limite)` | Artigos coletados que mencionam o conceito |
-| `estatisticas_grafo()` | Contagens de nós e arestas |
+| `neuro://ontologia/estatisticas` | Contagens da ontologia (conceitos, categorias, domínios, relações) |
+| `neuro://ontologia/conceitos` | Todos os conceitos (`id`, `rotuloPt`, `categoria`, `statusInclusao`) |
+| `neuro://ontologia/categorias` | Categorias taxonômicas (com hierarquia `superClasse`) |
+| `neuro://ontologia/dominios` | Domínios cognitivos (atenção, funções executivas, etc.) |
+| `neuro://conceito/{concept_id}` | **Template** — detalhe COMPLETO de um conceito. Ex.: `neuro://conceito/nd:tdah` |
+
+#### 💬 Prompts
+
+| Prompt | Argumentos | Uso |
+| :-- | :-- | :-- |
+| **`explicar_neurodivergencia`** | `termo` | Gera uma instrução para explicar didaticamente uma neurodivergência, embasada no GraphRAG (definição, características, pontos fortes, domínios, comorbidades, diagnóstico diferencial) |
+| **`comparar_neurodivergencias`** | `termo_a`, `termo_b` | Gera uma instrução para comparar duas condições (semelhanças, diferenças, sobreposição, diagnóstico diferencial) |
 
 Configuração em um cliente MCP (`.mcp.json`):
 

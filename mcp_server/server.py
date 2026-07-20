@@ -19,6 +19,7 @@ NEURO_EMBEDDING_PROVIDER (auto|sentence-transformers|ollama|hashing).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -171,6 +172,104 @@ def estatisticas_grafo() -> Dict[str, Any]:
         return {"nos": nos, "arestas": arestas}
     except Exception as e:  # noqa: BLE001
         return {"erro": str(e), "dica": "Neo4j está no ar? (docker compose up -d)"}
+
+
+# ==========================================================================
+# RECURSOS (MCP Resources) — dados navegáveis da ONTOLOGIA, somente leitura.
+# Não dependem do Neo4j (leem o JSON local), então estão SEMPRE disponíveis.
+# ==========================================================================
+
+def _ontology_mgr() -> OntologyManager:
+    return _get_retriever().ontology_mgr
+
+
+@mcp.resource(
+    "neuro://ontologia/estatisticas", mime_type="application/json",
+    description="Contagens da ontologia (conceitos, categorias, domínios, relações).",
+)
+def recurso_estatisticas() -> str:
+    o = _ontology_mgr()
+    return json.dumps({
+        "conceitos": len(o.conceitos),
+        "categorias": len(o.categorias),
+        "dominiosCognitivos": len(o.dominios),
+        "relacoes": len(o.relacoes),
+    }, ensure_ascii=False)
+
+
+@mcp.resource(
+    "neuro://ontologia/conceitos", mime_type="application/json",
+    description="Lista de todos os conceitos (id, rótulo, categoria, status de inclusão).",
+)
+def recurso_conceitos() -> str:
+    o = _ontology_mgr()
+    return json.dumps(
+        [{"id": c.id, "rotuloPt": c.rotuloPt, "categoria": c.categoria,
+          "statusInclusao": c.statusInclusao} for c in o.conceitos.values()],
+        ensure_ascii=False,
+    )
+
+
+@mcp.resource(
+    "neuro://ontologia/categorias", mime_type="application/json",
+    description="Categorias taxonômicas (com hierarquia via superClasse).",
+)
+def recurso_categorias() -> str:
+    o = _ontology_mgr()
+    return json.dumps(
+        [{"id": c.id, "rotuloPt": c.rotuloPt, "superClasse": c.superClasse}
+         for c in o.categorias.values()],
+        ensure_ascii=False,
+    )
+
+
+@mcp.resource(
+    "neuro://ontologia/dominios", mime_type="application/json",
+    description="Domínios cognitivos (atenção, funções executivas, processamento sensorial, etc.).",
+)
+def recurso_dominios() -> str:
+    o = _ontology_mgr()
+    return json.dumps(
+        [{"id": d.id, "rotuloPt": d.rotuloPt, "descricao": d.descricao}
+         for d in o.dominios.values()],
+        ensure_ascii=False,
+    )
+
+
+@mcp.resource(
+    "neuro://conceito/{concept_id}", mime_type="application/json",
+    description="Detalhe COMPLETO de um conceito. Ex.: neuro://conceito/nd:tdah",
+)
+def recurso_conceito(concept_id: str) -> str:
+    o = _ontology_mgr()
+    c = o.conceitos.get(concept_id)
+    if not c:
+        return json.dumps({"erro": f"conceito não encontrado: {concept_id}"}, ensure_ascii=False)
+    return json.dumps(c.model_dump(), ensure_ascii=False)
+
+
+# ==========================================================================
+# PROMPTS (MCP Prompts) — modelos reutilizáveis que o cliente pode invocar.
+# ==========================================================================
+
+@mcp.prompt(description="Explica uma neurodivergência de forma didática, embasada no grafo.")
+def explicar_neurodivergencia(termo: str) -> str:
+    return (
+        f"Explique '{termo}' de forma clara e didática. Use a ferramenta "
+        f"`responder_com_graphrag` para embasar a resposta no grafo de conhecimento e cubra: "
+        f"definição, principais características, PONTOS FORTES (paradigma da neurodiversidade), "
+        f"domínios cognitivos afetados, comorbidades frequentes e diagnóstico diferencial. "
+        f"Cite as fontes/evidências e NÃO faça diagnóstico de indivíduos."
+    )
+
+
+@mcp.prompt(description="Compara duas neurodivergências (semelhanças, diferenças, diagnóstico diferencial).")
+def comparar_neurodivergencias(termo_a: str, termo_b: str) -> str:
+    return (
+        f"Compare '{termo_a}' e '{termo_b}'. Use `responder_com_graphrag` e/ou `buscar_conceito` "
+        f"para embasar. Aponte semelhanças, diferenças, sobreposição de sintomas, comorbidade "
+        f"entre eles (se houver) e como fazer o diagnóstico diferencial. Rotule conteúdo, não pessoas."
+    )
 
 
 # ---------------------------------------------------------------------------
