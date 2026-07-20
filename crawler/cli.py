@@ -44,6 +44,22 @@ def main():
         help="Executa a semeadura da ontologia e o crawling completo."
     )
     parser.add_argument(
+        "--ingest-samples",
+        action="store_true",
+        help="Popula o grafo com o corpus de amostra OFFLINE (sem rede) — semeia ontologia + artigos + chunks/embeddings."
+    )
+    parser.add_argument(
+        "--graphrag",
+        type=str,
+        metavar="PERGUNTA",
+        help="Faz uma consulta GraphRAG (recuperação híbrida) e imprime o contexto recuperado."
+    )
+    parser.add_argument(
+        "--no-embeddings",
+        action="store_true",
+        help="Desativa a geração de embeddings/chunks (grafo sem busca vetorial)."
+    )
+    parser.add_argument(
         "--query",
         type=str,
         help="Consulta/Dork personalizada para buscar conteúdos específicos (ex.: 'autismo feminino')."
@@ -96,8 +112,50 @@ def main():
     pipeline = NeuroCrawlerPipeline(
         neo4j_uri=args.neo4j_uri,
         neo4j_user=args.neo4j_user,
-        neo4j_password=args.neo4j_password
+        neo4j_password=args.neo4j_password,
+        use_embeddings=not args.no_embeddings,
     )
+
+    # --- Modo GraphRAG: recupera contexto e encerra ---
+    if args.graphrag:
+        from graphrag.retriever import GraphRAGRetriever
+
+        retriever = GraphRAGRetriever(repo=pipeline.db, ontology_mgr=pipeline.ontology_mgr,
+                                      embedder=pipeline.embedder)
+        result = retriever.retrieve(args.graphrag)
+        console.print(Panel.fit(f"[bold]Pergunta:[/bold] {args.graphrag}", border_style="magenta"))
+        if result.avisos:
+            for av in result.avisos:
+                console.print(f"[yellow]Aviso:[/yellow] {av}")
+        console.print(f"[bold cyan]Conceitos recuperados:[/bold cyan] "
+                      f"{', '.join(f'{c.rotuloPt} ({c.score})' for c in result.conceitos) or '—'}")
+        console.print(f"[bold cyan]Evidências (chunks):[/bold cyan] {len(result.chunks)}")
+        console.print(Panel(result.contextoFormatado, title="Contexto GraphRAG", border_style="green"))
+        return
+
+    # --- Modo ingestão offline (corpus de amostra) ---
+    if args.ingest_samples:
+        console.print("[bold green]Ingerindo corpus de amostra OFFLINE no Neo4j...[/bold green]")
+        try:
+            summary = pipeline.ingest_samples(seed_first=True)
+        except Exception as e:
+            console.print(f"[bold red]Erro na ingestão:[/bold red] {e}")
+            console.print("[yellow]Verifique se o Neo4j está no ar: docker compose up -d[/yellow]")
+            sys.exit(1)
+        table = Table(title="Ingestão Offline (corpus de amostra)", border_style="bright_blue")
+        table.add_column("Métrica", style="bold"); table.add_column("Valor", style="cyan")
+        table.add_row("Artigos no corpus", str(summary.totalBuscados))
+        table.add_row("Processados", str(summary.totalProcessados))
+        table.add_row("Salvos no Neo4j", str(summary.totalSalvosNeo4j))
+        table.add_row("Erros", str(summary.totalErros))
+        console.print(table)
+        if summary.conceitosMaisMencionados:
+            c_table = Table(title="Conceitos identificados", border_style="green")
+            c_table.add_column("Conceito", style="bold magenta"); c_table.add_column("Menções", style="bold green")
+            for conceito, count in sorted(summary.conceitosMaisMencionados.items(), key=lambda x: x[1], reverse=True)[:15]:
+                c_table.add_row(conceito, str(count))
+            console.print(c_table)
+        return
 
     if args.seed_ontology or (args.full and not args.crawl):
         console.print("[bold green]Semeando Ontologia no Neo4j...[/bold green]")

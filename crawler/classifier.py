@@ -52,13 +52,35 @@ class ConceptClassifier:
         """
         Analisa o título e o conteúdo do artigo e calcula os matches com a ontologia.
         """
-        full_text = f"{article.titulo}\n{article.conteudoTexto}"
-        full_text_norm = normalize_text(full_text)
-        title_norm = normalize_text(article.titulo)
+        full_text_norm = normalize_text(f"{article.titulo}\n{article.conteudoTexto}")
+        article.contextosDetectados = self.detect_context_signals(full_text_norm)
+        article.matchesOntologia = self.match_concepts_in_text(
+            f"{article.titulo}\n{article.conteudoTexto}",
+            title=article.titulo,
+            min_confidence=self.min_confidence,
+            evidence_source=article.conteudoTexto,
+        )
+        return article
+
+    def match_concepts_in_text(
+        self,
+        text: str,
+        title: str = "",
+        min_confidence: float | None = None,
+        evidence_source: str | None = None,
+    ) -> List[MatchEvidence]:
+        """
+        Pontua os conceitos da ontologia contra um texto arbitrário (artigo OU pergunta
+        do usuário) e devolve os matches acima de `min_confidence`, ordenados por confiança.
+        Reaproveitado pelo GraphRAG para ancorar a pergunta nos conceitos da ontologia.
+        """
+        if min_confidence is None:
+            min_confidence = self.min_confidence
+        full_text_norm = normalize_text(text)
+        title_norm = normalize_text(title)
+        evidence_source = evidence_source if evidence_source is not None else text
 
         matches: List[MatchEvidence] = []
-        detected_contexts = self.detect_context_signals(full_text_norm)
-        article.contextosDetectados = detected_contexts
 
         for concept in self.ontology_mgr.conceitos.values():
             termos_encontrados = set()
@@ -133,9 +155,9 @@ class ConceptClassifier:
             # O score máximo possível é em torno de 3.5 a 4.0
             confianca_calculada = min(1.0, score_acumulado / 2.2)
 
-            if confianca_calculada >= self.min_confidence and len(termos_encontrados) > 0:
-                snippets = self.extract_evidence_snippets(article.conteudoTexto, termos_encontrados)
-                
+            if confianca_calculada >= min_confidence and len(termos_encontrados) > 0:
+                snippets = self.extract_evidence_snippets(evidence_source, termos_encontrados)
+
                 evidence = MatchEvidence(
                     conceitoId=concept.id,
                     rotuloConceito=concept.rotuloPt,
@@ -153,5 +175,4 @@ class ConceptClassifier:
 
         # Ordena matches por confiança decrescente
         matches.sort(key=lambda x: x.confianca, reverse=True)
-        article.matchesOntologia = matches
-        return article
+        return matches

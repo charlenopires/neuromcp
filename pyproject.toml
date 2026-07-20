@@ -17,15 +17,37 @@ dependencies = [
     "tenacity>=8.5.0",
 ]
 
+[project.optional-dependencies]
+# Embeddings semânticos locais para o GraphRAG (multilíngue, forte em PT-BR).
+# Instale com: uv sync --extra embeddings
+embeddings = [
+    "sentence-transformers>=3.0.0",
+]
+# Servidor MCP (Model Context Protocol) que expõe o GraphRAG como ferramentas.
+# Instale com: uv sync --extra mcp
+mcp = [
+    "mcp[cli]>=1.2.0",
+]
+
 [project.scripts]
 crawler = "crawler.cli:main"
+neuro-mcp = "mcp_server.server:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# O nome do projeto (neuromcp-crawler) difere das pastas dos pacotes, então
+# declaramos explicitamente o que vai no wheel (senão o hatchling não descobre).
+[tool.hatch.build.targets.wheel]
+packages = ["crawler", "graphrag", "mcp_server"]
 
 [tool.uv]
 dev-dependencies = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

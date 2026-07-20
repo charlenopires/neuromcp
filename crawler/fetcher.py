@@ -23,6 +23,10 @@ class WebFetcher:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
+        if not settings.tls_verify:
+            logger.warning(
+                "NEURO_ALLOW_INSECURE_TLS ativo: verificação TLS DESATIVADA (inseguro, sujeito a MITM)."
+            )
 
     def _extract_domain(self, url: str) -> str:
         """Extrai o nome do domínio principal da URL."""
@@ -50,7 +54,7 @@ class WebFetcher:
                 headers=self.headers,
                 timeout=settings.request_timeout_seconds,
                 follow_redirects=True,
-                verify=False  # Para lidar com certificados auto-assinados de alguns repositórios acadêmicos
+                verify=settings.tls_verify  # verificação TLS ligada por padrão (ver config)
             ) as client:
                 response = await client.get(url)
                 if response.status_code != 200:

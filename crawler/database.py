@@ -1,12 +1,23 @@
 import logging
 from typing import Optional, Dict, Any, List
+
 from neo4j import GraphDatabase, Driver
 
 from crawler.config import settings
-from crawler.models import CrawledArticle
-from crawler.ontology import OntologyManager
+from crawler.models import CrawledArticle, Concept
+from crawler.ontology import OntologyManager, normalize_text
 
 logger = logging.getLogger("neuromcp.database")
+
+
+def concept_indexable_text(c: Concept) -> str:
+    """Texto denso e pesquisável de um conceito (para fulltext e embedding)."""
+    partes: List[str] = [c.rotuloPt, c.rotuloEn]
+    partes += c.sigla + c.sinonimos + c.caracteristicas + c.pontosFortes
+    partes += c.palavrasChave.get("pt", []) + c.palavrasChave.get("en", [])
+    if c.definicao:
+        partes.append(c.definicao)
+    return " | ".join(p for p in partes if p)
 
 
 class Neo4jRepository:
@@ -45,27 +56,81 @@ class Neo4jRepository:
             self._driver = None
             logger.info("Conexão com Neo4j encerrada.")
 
+    def run_read(self, cypher: str, **params: Any) -> List[Dict[str, Any]]:
+        """Executa uma consulta de leitura e devolve a lista de registros como dicts."""
+        driver = self.connect()
+        with driver.session() as session:
+            result = session.run(cypher, **params)
+            return [r.data() for r in result]
+
     def create_constraints(self) -> None:
-        """Cria as restrições de unicidade e índices no Neo4j."""
+        """Cria as restrições de unicidade no Neo4j."""
         driver = self.connect()
         constraints = [
             "CREATE CONSTRAINT conceito_id IF NOT EXISTS FOR (c:Conceito) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT categoria_id IF NOT EXISTS FOR (c:Categoria) REQUIRE c.id IS UNIQUE",
             "CREATE CONSTRAINT dominio_id IF NOT EXISTS FOR (d:DominioCognitivo) REQUIRE d.id IS UNIQUE",
+            "CREATE CONSTRAINT codigo_id IF NOT EXISTS FOR (cod:Codigo) REQUIRE cod.id IS UNIQUE",
             "CREATE CONSTRAINT artigo_url IF NOT EXISTS FOR (a:Artigo) REQUIRE a.url IS UNIQUE",
-            "CREATE CONSTRAINT fonte_dominio IF NOT EXISTS FOR (f:Fonte) REQUIRE f.dominio IS UNIQUE"
+            "CREATE CONSTRAINT fonte_dominio IF NOT EXISTS FOR (f:Fonte) REQUIRE f.dominio IS UNIQUE",
+            "CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (ch:Chunk) REQUIRE ch.id IS UNIQUE",
         ]
         with driver.session() as session:
             for query in constraints:
                 session.run(query)
-        logger.info("Restrições e índices do Neo4j validados.")
+        logger.info("Restrições de unicidade do Neo4j validadas.")
 
-    def seed_ontology(self, ontology_mgr: OntologyManager) -> None:
+    def create_indexes(self, embedding_dimension: Optional[int] = None) -> None:
+        """
+        Cria os índices que sustentam o GraphRAG:
+          - FULLTEXT (Lucene) para busca lexical/BM25 em conceitos, artigos e chunks;
+          - VECTOR NATIVO (HNSW) para busca semântica em conceitos e chunks.
+        O índice vetorial nativo torna DESNECESSÁRIO um banco vetorial externo.
+        """
+        dim = embedding_dimension or settings.embedding_dimension
+        sim = settings.embedding_similarity
+        driver = self.connect()
+
+        fulltext = [
+            "CREATE FULLTEXT INDEX conceito_fulltext IF NOT EXISTS "
+            "FOR (c:Conceito) ON EACH [c.textoIndexavel]",
+            "CREATE FULLTEXT INDEX artigo_fulltext IF NOT EXISTS "
+            "FOR (a:Artigo) ON EACH [a.titulo, a.conteudoTexto]",
+            "CREATE FULLTEXT INDEX chunk_fulltext IF NOT EXISTS "
+            "FOR (ch:Chunk) ON EACH [ch.texto]",
+        ]
+        vector = [
+            f"""
+            CREATE VECTOR INDEX conceito_embedding IF NOT EXISTS
+            FOR (c:Conceito) ON (c.embedding)
+            OPTIONS {{ indexConfig: {{
+                `vector.dimensions`: {dim},
+                `vector.similarity_function`: '{sim}'
+            }} }}
+            """,
+            f"""
+            CREATE VECTOR INDEX chunk_embedding IF NOT EXISTS
+            FOR (ch:Chunk) ON (ch.embedding)
+            OPTIONS {{ indexConfig: {{
+                `vector.dimensions`: {dim},
+                `vector.similarity_function`: '{sim}'
+            }} }}
+            """,
+        ]
+        with driver.session() as session:
+            for q in fulltext + vector:
+                session.run(q)
+        logger.info("Índices fulltext + vetoriais (dim=%d, %s) criados.", dim, sim)
+
+    def seed_ontology(self, ontology_mgr: OntologyManager, embedder: Optional[Any] = None) -> None:
         """
         Importa a estrutura completa da ontologia JSON para o Neo4j.
         Cria os nós de Conceito, Categoria, DominioCognitivo e Codigo, além de todas as arestas.
+        Cria também as restrições e índices (fulltext + vetorial).
+        Se `embedder` for informado, grava o vetor de cada Conceito para busca semântica.
         """
         self.create_constraints()
+        self.create_indexes(embedding_dimension=getattr(embedder, "dimension", None))
         driver = self.connect()
         logger.info("Semeando ontologia de neurodivergência no Neo4j...")
 
@@ -104,6 +169,10 @@ class Neo4jRepository:
 
             # 3. Conceitos e Códigos
             for conc in ontology_mgr.conceitos.values():
+                texto_idx = concept_indexable_text(conc)
+                embedding = None
+                if embedder is not None:
+                    embedding = embedder.embed_text(texto_idx)
                 session.run(
                     """
                     MERGE (c:Conceito {id: $id})
@@ -111,6 +180,7 @@ class Neo4jRepository:
                         c.rotuloPt = $rotuloPt,
                         c.rotuloEn = $rotuloEn,
                         c.statusInclusao = $statusInclusao,
+                        c.categoria = $categoria,
                         c.definicao = $definicao,
                         c.sigla = $sigla,
                         c.sinonimos = $sinonimos,
@@ -118,13 +188,19 @@ class Neo4jRepository:
                         c.pontosFortes = $pontosFortes,
                         c.beneficiaDe = $beneficiaDe,
                         c.hashtags = $hashtags,
-                        c.fontes = $fontes
+                        c.fontes = $fontes,
+                        c.textoIndexavel = $textoIndexavel
+                    WITH c
+                    FOREACH (_ IN CASE WHEN $embedding IS NULL THEN [] ELSE [1] END |
+                        SET c.embedding = $embedding)
                     """,
                     id=conc.id, tipoNo=conc.tipoNo, rotuloPt=conc.rotuloPt, rotuloEn=conc.rotuloEn,
-                    statusInclusao=conc.statusInclusao, definicao=conc.definicao, sigla=conc.sigla,
+                    statusInclusao=conc.statusInclusao, categoria=conc.categoria,
+                    definicao=conc.definicao, sigla=conc.sigla,
                     sinonimos=conc.sinonimos, caracteristicas=conc.caracteristicas,
                     pontosFortes=conc.pontosFortes, beneficiaDe=conc.beneficiaDe,
-                    hashtags=conc.hashtags, fontes=conc.fontes
+                    hashtags=conc.hashtags, fontes=conc.fontes,
+                    textoIndexavel=texto_idx, embedding=embedding
                 )
 
                 # Relaciona com Categoria
@@ -190,9 +266,11 @@ class Neo4jRepository:
 
         logger.info("Ontologia semeada no Neo4j com sucesso!")
 
-    def save_article(self, article: CrawledArticle) -> bool:
+    def save_article(self, article: CrawledArticle, embedder: Optional[Any] = None) -> bool:
         """
         Salva o artigo lido e suas relações com os conceitos da ontologia no Neo4j.
+        Se `embedder` for informado, o texto é fatiado em `:Chunk` com embeddings
+        (base da recuperação semântica do GraphRAG).
         """
         if not article.matchesOntologia:
             logger.info(f"Ignorando artigo sem correspondências com ontologia: {article.url}")
@@ -209,13 +287,14 @@ class Neo4jRepository:
                 dominio=article.dominioFonte, tipoFonte=article.tipoFonte.value
             )
 
-            # Mergear nó do Artigo
+            # Mergear nó do Artigo (guarda o texto para o índice fulltext)
             session.run(
                 """
                 MERGE (a:Artigo {url: $url})
                 SET a.titulo = $titulo,
                     a.tipoFonte = $tipoFonte,
                     a.resumo = $resumo,
+                    a.conteudoTexto = $conteudo,
                     a.dataPublicacao = $dataPublicacao,
                     a.dataColeta = $dataColeta,
                     a.autores = $autores,
@@ -226,11 +305,33 @@ class Neo4jRepository:
                 MERGE (a)-[:PUBLICADO_EM]->(f)
                 """,
                 url=article.url, titulo=article.titulo, tipoFonte=article.tipoFonte.value,
-                resumo=article.resumo, dataPublicacao=article.dataPublicacao,
+                resumo=article.resumo, conteudo=article.conteudoTexto[:20000],
+                dataPublicacao=article.dataPublicacao,
                 dataColeta=article.dataColeta, autores=article.autores,
                 contextos=article.contextosDetectados, queryBusca=article.queryBuscaUtilizada,
                 dominio=article.dominioFonte
             )
+
+            # Fatiar em chunks com embeddings (recuperação semântica do GraphRAG)
+            if embedder is not None:
+                from crawler.chunking import split_into_chunks
+
+                chunks = split_into_chunks(article.conteudoTexto)
+                vetores = embedder.embed_texts(chunks) if chunks else []
+                for ordem, (texto_chunk, vetor) in enumerate(zip(chunks, vetores)):
+                    session.run(
+                        """
+                        MATCH (a:Artigo {url: $url})
+                        MERGE (ch:Chunk {id: $chunkId})
+                        SET ch.texto = $texto,
+                            ch.ordem = $ordem,
+                            ch.url = $url,
+                            ch.embedding = $vetor
+                        MERGE (a)-[:HAS_CHUNK]->(ch)
+                        """,
+                        url=article.url, chunkId=f"{article.url}#{ordem}",
+                        texto=texto_chunk, ordem=ordem, vetor=vetor
+                    )
 
             # Criar conexões com Conceitos Mencionados
             for match in article.matchesOntologia:
